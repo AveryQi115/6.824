@@ -202,7 +202,9 @@ func (cfg *config) ingestSnap(i int, snapshot []byte, index int) string {
 	for j := 0; j < len(xlog); j++ {
 		cfg.logs[i][j] = xlog[j]
 	}
-	cfg.lastApplied[i] = lastIncludedIndex
+	if lastIncludedIndex > cfg.lastApplied[i]{
+		cfg.lastApplied[i] = lastIncludedIndex
+	}
 	return ""
 }
 

@@ -55,7 +55,6 @@ type Raft struct {
 	chanGrantVote chan bool						// follower/candidate receive request for vote
 	chanWinElect  chan bool						// candidate wins election
 	chanHeartbeat chan bool						// follower receive heartbeat
-	chanSnapshot  chan bool
 }
 
 // return currentTerm and whether this server
@@ -298,7 +297,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if rf.commitIndex < args.LeaderCommit {
 			// update commitIndex and apply log
 			rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
-			go rf.applyLog()
 		}
 	}
 
@@ -309,7 +307,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("rf %v send log to %v, args=%+v,reply=%+v\n",rf.me,server,args,reply)
+	// DPrintf("rf %v send log to %v, args=%+v,reply=%+v\n",rf.me,server,args,reply)
 
 	if !ok || rf.state != STATE_LEADER || args.Term != rf.currentTerm {
 		// invalid request
@@ -344,7 +342,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		}
 		if count > len(rf.peers)/2 {
 			rf.commitIndex = N
-			go rf.applyLog()
 			break
 		}
 	}
@@ -503,26 +500,28 @@ func (rf *Raft) readPersist(data []byte) {
 // apply log entries with index in range [lastApplied + 1, commitIndex]
 //
 func (rf *Raft) applyLog() {
-	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	var maxI int
+	if rf.log[0].Index==0{
+		maxI = rf.log[0].Index+SnapShotInterval-1
+	}else{
+		maxI = rf.log[0].Index+SnapShotInterval
+	}
+	var i int
+	for i = rf.lastApplied + 1; i <= min(rf.commitIndex,maxI); i++ {
 		msg := ApplyMsg{}
 		msg.CommandIndex = i
 		msg.CommandValid = true
 		if i-rf.log[0].Index >0 && i-rf.log[0].Index <len(rf.log) {
 			msg.Command = rf.log[i-rf.log[0].Index].Command
-		}else{
-			return
-		}
-		select{
-		case <-rf.chanSnapshot:
-			return
-		default:
 			rf.chanApply<-msg
 			DPrintf("rf %v apply log %v\n",rf.me,i)
+		}else{
+			break
 		}
 	}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.lastApplied = rf.commitIndex
+	rf.lastApplied = i-1
 }
 
 /******************************************************************** snapshot ************************************************/
@@ -533,7 +532,6 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 }
 
 func(rf *Raft) applySnapshot(valid bool, data []byte, term int, index int){
-	rf.chanSnapshot<-true
 	rf.chanApply<-ApplyMsg{
 		SnapshotValid: valid,
 		Snapshot: data,
@@ -542,7 +540,9 @@ func(rf *Raft) applySnapshot(valid bool, data []byte, term int, index int){
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.lastApplied = index
+	if index > rf.lastApplied{
+		rf.lastApplied = index
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -733,6 +733,15 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) applyLogRoutine(){
+	for{
+		select{
+			case <-time.After(time.Millisecond * time.Duration(rand.Intn(200))):
+				go rf.applyLog()
+		}
+	}
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -767,7 +776,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.chanGrantVote = make(chan bool, 100)
 	rf.chanWinElect = make(chan bool, 100)
 	rf.chanHeartbeat = make(chan bool, 100)
-	rf.chanSnapshot = make(chan bool, 100)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -775,6 +783,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persist()
 
 	go rf.Run()
+	go rf.applyLogRoutine()
 
 	return rf
 }
